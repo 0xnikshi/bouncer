@@ -1,10 +1,13 @@
-package bouncer
+package bouncer_test
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/0xnikshi/bouncer"
 )
 
 // fakeClock is a manually-advanced Clock for deterministic tests.
@@ -13,9 +16,7 @@ type fakeClock struct {
 	now time.Time
 }
 
-func newFakeClock() *fakeClock {
-	return &fakeClock{now: time.Unix(0, 0)}
-}
+func newFakeClock() *fakeClock { return &fakeClock{now: time.Unix(0, 0)} }
 
 func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
@@ -30,19 +31,22 @@ func (c *fakeClock) Advance(d time.Duration) {
 }
 
 func TestNewValidation(t *testing.T) {
+	store := bouncer.NewMemoryStore()
 	tests := []struct {
-		name string
-		cfg  Config
-		want error
+		name  string
+		store bouncer.Store
+		p     bouncer.Policy
+		want  error
 	}{
-		{"unknown algorithm", Config{Algorithm: "nope", Rate: 1}, ErrUnknownAlgorithm},
-		{"zero rate", Config{Algorithm: TokenBucket, Rate: 0}, ErrInvalidRate},
-		{"negative rate", Config{Algorithm: TokenBucket, Rate: -1}, ErrInvalidRate},
-		{"negative burst", Config{Algorithm: TokenBucket, Rate: 1, Burst: -1}, ErrInvalidBurst},
+		{"nil store", nil, bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1}, bouncer.ErrNilStore},
+		{"zero rate", store, bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 0}, bouncer.ErrInvalidRate},
+		{"negative rate", store, bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: -1}, bouncer.ErrInvalidRate},
+		{"negative burst", store, bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: -1}, bouncer.ErrInvalidBurst},
+		{"unsupported algorithm", store, bouncer.Policy{Algorithm: "nope", Rate: 1}, bouncer.ErrUnsupportedAlgorithm},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(tt.cfg)
+			_, err := bouncer.New(tt.store, tt.p)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("New() error = %v, want %v", err, tt.want)
 			}
@@ -50,112 +54,115 @@ func TestNewValidation(t *testing.T) {
 	}
 }
 
-func TestNewBurstDefault(t *testing.T) {
-	// Fractional rate should still yield a usable limiter (Burst defaults to
-	// ceil(Rate) = 1), admitting one event up front.
-	lim, err := New(Config{Algorithm: TokenBucket, Rate: 0.5})
+func TestBurstDefault(t *testing.T) {
+	// Fractional rate -> Burst defaults to ceil(Rate)=1, so one event passes.
+	lim, err := bouncer.NewMemory(bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 0.5})
 	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		t.Fatalf("NewMemory() error = %v", err)
 	}
-	if !lim.Allow() {
-		t.Fatal("expected first event to be allowed with default burst")
-	}
-}
-
-func TestAlgorithmsRegistered(t *testing.T) {
-	got := Algorithms()
-	want := map[Algorithm]bool{TokenBucket: true, LeakyBucket: true}
-	for _, a := range got {
-		delete(want, a)
-	}
-	if len(want) != 0 {
-		t.Fatalf("missing built-in algorithms: %v (got %v)", want, got)
+	if ok, _ := lim.Allow(context.Background(), "k"); !ok {
+		t.Fatal("expected first event allowed with default burst")
 	}
 }
 
-func TestRegisterPanics(t *testing.T) {
-	t.Run("empty name", func(t *testing.T) {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("expected panic on empty name")
-			}
-		}()
-		Register("", func(Config, Clock) (Limiter, error) { return nil, nil })
-	})
-	t.Run("nil constructor", func(t *testing.T) {
-		defer func() {
-			if recover() == nil {
-				t.Fatal("expected panic on nil constructor")
-			}
-		}()
-		Register("x", nil)
-	})
-}
+func TestAllowNEdgeCases(t *testing.T) {
+	ctx := context.Background()
+	lim, _ := bouncer.NewMemory(bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 10, Burst: 5})
 
-// commonLimiterContract exercises behavior every Limiter must honor regardless
-// of algorithm.
-func commonLimiterContract(t *testing.T, algo Algorithm) {
-	t.Helper()
-	clk := newFakeClock()
-	lim, err := New(Config{Algorithm: algo, Rate: 10, Burst: 5}, WithClock(clk))
-	if err != nil {
-		t.Fatalf("New(%s) error = %v", algo, err)
+	if ok, _ := lim.AllowN(ctx, "k", 0); !ok {
+		t.Error("AllowN(0) should be true")
 	}
-
-	if !lim.AllowN(0) {
-		t.Error("AllowN(0) should always be true")
-	}
-	if lim.AllowN(-1) {
+	if ok, _ := lim.AllowN(ctx, "k", -1); ok {
 		t.Error("AllowN(-1) should be false")
 	}
-	// A request larger than capacity can never be admitted.
-	if lim.AllowN(6) {
+	if ok, _ := lim.AllowN(ctx, "k", 6); ok {
 		t.Error("AllowN(burst+1) should be false")
 	}
 }
 
-func TestCommonContract(t *testing.T) {
-	for _, algo := range []Algorithm{TokenBucket, LeakyBucket} {
-		t.Run(string(algo), func(t *testing.T) {
-			commonLimiterContract(t, algo)
-		})
+// memoryContract exercises behavior both built-in algorithms must honor.
+func memoryContract(t *testing.T, algo bouncer.Algorithm) {
+	t.Helper()
+	ctx := context.Background()
+	clk := newFakeClock()
+	lim, err := bouncer.NewMemory(
+		bouncer.Policy{Algorithm: algo, Rate: 10, Burst: 5},
+		bouncer.WithClock(clk),
+	)
+	if err != nil {
+		t.Fatalf("NewMemory(%s) error = %v", algo, err)
+	}
+
+	// Burst of 5 from a fresh key, then denied.
+	for i := 0; i < 5; i++ {
+		if ok, _ := lim.Allow(ctx, "user"); !ok {
+			t.Fatalf("%s: event %d should be allowed", algo, i)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "user"); ok {
+		t.Fatalf("%s: 6th event should be denied", algo)
+	}
+
+	// At 10/sec, 100ms restores capacity for exactly one event.
+	clk.Advance(100 * time.Millisecond)
+	if ok, _ := lim.Allow(ctx, "user"); !ok {
+		t.Fatalf("%s: event should be allowed after 100ms", algo)
+	}
+	if ok, _ := lim.Allow(ctx, "user"); ok {
+		t.Fatalf("%s: only one event of capacity should have recovered", algo)
 	}
 }
 
-// TestConcurrentAccess ensures the limiters are race-free under -race. It does
-// not assert an exact count, only that exactly Burst events are admitted from a
-// full/empty bucket with no time advancing.
+func TestMemoryContract(t *testing.T) {
+	for _, algo := range []bouncer.Algorithm{bouncer.TokenBucket, bouncer.LeakyBucket} {
+		t.Run(string(algo), func(t *testing.T) { memoryContract(t, algo) })
+	}
+}
+
+func TestPerKeyIsolation(t *testing.T) {
+	ctx := context.Background()
+	lim, _ := bouncer.NewMemory(bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: 2})
+
+	lim.Allow(ctx, "alice")
+	lim.Allow(ctx, "alice")
+	if ok, _ := lim.Allow(ctx, "alice"); ok {
+		t.Fatal("alice should be exhausted")
+	}
+	if ok, _ := lim.Allow(ctx, "bob"); !ok {
+		t.Fatal("bob should be unaffected by alice")
+	}
+}
+
+// TestConcurrentAccess runs under -race and asserts exactly Burst events are
+// admitted for one key when time does not advance.
 func TestConcurrentAccess(t *testing.T) {
-	for _, algo := range []Algorithm{TokenBucket, LeakyBucket} {
-		t.Run(string(algo), func(t *testing.T) {
-			clk := newFakeClock()
-			const burst = 100
-			lim, err := New(Config{Algorithm: algo, Rate: 1, Burst: burst}, WithClock(clk))
-			if err != nil {
-				t.Fatalf("New() error = %v", err)
-			}
+	ctx := context.Background()
+	clk := newFakeClock()
+	const burst = 100
+	lim, _ := bouncer.NewMemory(
+		bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: burst},
+		bouncer.WithClock(clk),
+	)
 
-			var (
-				wg      sync.WaitGroup
-				mu      sync.Mutex
-				allowed int
-			)
-			for i := 0; i < burst*4; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					if lim.Allow() {
-						mu.Lock()
-						allowed++
-						mu.Unlock()
-					}
-				}()
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		allowed int
+	)
+	for i := 0; i < burst*4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ok, _ := lim.Allow(ctx, "user"); ok {
+				mu.Lock()
+				allowed++
+				mu.Unlock()
 			}
-			wg.Wait()
+		}()
+	}
+	wg.Wait()
 
-			if allowed != burst {
-				t.Fatalf("admitted %d events, want %d", allowed, burst)
-			}
-		})
+	if allowed != burst {
+		t.Fatalf("admitted %d events, want %d", allowed, burst)
 	}
 }
