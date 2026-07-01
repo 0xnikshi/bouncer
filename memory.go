@@ -24,11 +24,14 @@ type MemoryStore struct {
 }
 
 // bucket holds the state for one key. val is interpreted per algorithm: tokens
-// available (token bucket) or current water level (leaky bucket).
+// available (token bucket), current water level (leaky bucket), or the count of
+// events in the current window (fixed window). window is the active window's
+// index, used only by the fixed window algorithm.
 type bucket struct {
-	val  float64
-	last time.Time
-	init bool
+	val    float64
+	last   time.Time
+	window int64
+	init   bool
 }
 
 // MemoryOption customizes a MemoryStore.
@@ -54,7 +57,7 @@ func NewMemoryStore(opts ...MemoryOption) *MemoryStore {
 
 // Supports reports the algorithms MemoryStore implements.
 func (s *MemoryStore) Supports(a Algorithm) bool {
-	return a == TokenBucket || a == LeakyBucket
+	return a == TokenBucket || a == LeakyBucket || a == FixedWindow
 }
 
 // Allow applies p to key for n events. See Store for the contract.
@@ -74,6 +77,8 @@ func (s *MemoryStore) Allow(_ context.Context, key string, p Policy, n int) (boo
 		return tokenBucketStep(b, p, n, now), nil
 	case LeakyBucket:
 		return leakyBucketStep(b, p, n, now), nil
+	case FixedWindow:
+		return fixedWindowStep(b, p, n, now), nil
 	default:
 		return false, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, p.Algorithm)
 	}
@@ -120,6 +125,28 @@ func leakyBucketStep(b *bucket, p Policy, n int, now time.Time) bool {
 	add := float64(n)
 	if b.val+add <= capacity {
 		b.val += add
+		return true
+	}
+	return false
+}
+
+// fixedWindowStep advances a fixed window counter and decides admission. Up to
+// p.Burst events are allowed per window of length p.Burst/p.Rate seconds; the
+// count resets when the window boundary is crossed. Windows are aligned to the
+// Unix epoch so all keys share boundaries.
+func fixedWindowStep(b *bucket, p Policy, n int, now time.Time) bool {
+	limit := float64(p.Burst)
+	windowSec := float64(p.Burst) / p.Rate
+	nowSec := float64(now.UnixNano()) / float64(time.Second)
+	// Integer division floors for non-negative values, giving the window index.
+	windowID := int64(nowSec / windowSec)
+
+	if !b.init || b.window != windowID {
+		b.val, b.window, b.init = 0, windowID, true
+	}
+
+	if b.val+float64(n) <= limit {
+		b.val += float64(n)
 		return true
 	}
 	return false

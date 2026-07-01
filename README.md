@@ -64,14 +64,21 @@ The call site is identical regardless of broker — only the `Store` you pass to
 
 ## Algorithms
 
-| Algorithm             | Behavior                                                                  |
-| --------------------- | ------------------------------------------------------------------------- |
-| `bouncer.TokenBucket` | Tokens accrue at `Rate` up to `Burst`. Allows bursts, caps the average.    |
-| `bouncer.LeakyBucket` | A queue of depth `Burst` draining at `Rate`. Smooths toward steady output. |
+| Algorithm             | Behavior                                                                       |
+| --------------------- | ----------------------------------------------------------------------------- |
+| `bouncer.TokenBucket` | Tokens accrue at `Rate` up to `Burst`. Allows bursts, caps the average.        |
+| `bouncer.LeakyBucket` | A queue of depth `Burst` draining at `Rate`. Smooths toward steady output.     |
+| `bouncer.FixedWindow` | Up to `Burst` events per fixed window of `Burst/Rate` seconds; resets at the boundary. |
 
-Both bound the long-run rate to `Rate`. The difference is shape: the token
-bucket lets a full bucket fire all at once, while the leaky bucket meters events
-toward a constant outflow.
+All three bound the long-run rate to `Rate`. The shapes differ: the token bucket
+lets a full bucket fire all at once; the leaky bucket meters events toward a
+constant outflow; the fixed window counts per time window and resets at each
+boundary (cheapest to compute, but can admit up to `2×Burst` across a boundary).
+
+Every algorithm reads a `Policy` the same way — `Burst` is the burst size and
+`Rate` is the long-run events/sec — so switching algorithms is a one-field
+change. For the fixed window that means a window of `Burst/Rate` seconds: e.g.
+`Rate: 1.67, Burst: 100` ≈ "100 events per minute".
 
 ## Distributed limiting with Redis (production)
 

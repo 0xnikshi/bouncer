@@ -96,3 +96,38 @@ redis.call('EXPIRE', key, ttl)
 
 return allowed
 `
+
+// fixedWindowScript implements the fixed window counter: up to `capacity` events
+// are allowed per window of length capacity/rate seconds, after which the count
+// resets. State is a single hash at KEYS[1] with fields {count, window} where
+// window is the current window index — kept on one key so it is cluster-safe.
+const fixedWindowScript = `
+local key       = KEYS[1]
+local rate      = tonumber(ARGV[1])
+local capacity  = tonumber(ARGV[2])
+local requested = tonumber(ARGV[3])
+
+local t   = redis.call('TIME')
+local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
+
+local window    = capacity / rate
+local window_id = math.floor(now / window)
+
+local state = redis.call('HMGET', key, 'count', 'window')
+local count = tonumber(state[1])
+local wid   = tonumber(state[2])
+if wid == nil or wid ~= window_id then
+  count = 0
+end
+
+local allowed = 0
+if count + requested <= capacity then
+  count   = count + requested
+  allowed = 1
+  redis.call('HSET', key, 'count', count, 'window', window_id)
+  -- Expire after the window ends (+1s slack) so idle keys self-clean.
+  redis.call('EXPIRE', key, math.ceil(window) + 1)
+end
+
+return allowed
+`

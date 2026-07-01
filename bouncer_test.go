@@ -119,6 +119,38 @@ func TestMemoryContract(t *testing.T) {
 	}
 }
 
+func TestFixedWindow(t *testing.T) {
+	ctx := context.Background()
+	clk := newFakeClock() // starts at Unix(0,0)
+	// Rate 10, Burst 5 -> window = 5/10 = 0.5s, limit 5 per window.
+	lim, _ := bouncer.NewMemory(
+		bouncer.Policy{Algorithm: bouncer.FixedWindow, Rate: 10, Burst: 5},
+		bouncer.WithClock(clk),
+	)
+
+	// Fill the first window.
+	for i := 0; i < 5; i++ {
+		if ok, _ := lim.Allow(ctx, "u"); !ok {
+			t.Fatalf("event %d should be allowed in the first window", i)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("6th event in the same window should be denied")
+	}
+
+	// Still the same window after 400ms (< 500ms): the count does not reset.
+	clk.Advance(400 * time.Millisecond)
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("still within the window, should be denied")
+	}
+
+	// Crossing into the next window at 500ms resets the count.
+	clk.Advance(100 * time.Millisecond)
+	if ok, _ := lim.Allow(ctx, "u"); !ok {
+		t.Fatal("new window should allow again")
+	}
+}
+
 func TestPerKeyIsolation(t *testing.T) {
 	ctx := context.Background()
 	lim, _ := bouncer.NewMemory(bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: 2})

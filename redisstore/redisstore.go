@@ -40,6 +40,7 @@ type Store struct {
 var scripts = map[bouncer.Algorithm]*redis.Script{
 	bouncer.TokenBucket: redis.NewScript(tokenBucketScript),
 	bouncer.LeakyBucket: redis.NewScript(leakyBucketScript),
+	bouncer.FixedWindow: redis.NewScript(fixedWindowScript),
 }
 
 // Option customizes a Store.

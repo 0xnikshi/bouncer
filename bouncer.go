@@ -28,9 +28,16 @@ import (
 type Algorithm string
 
 // Built-in algorithms.
+//
+// For every algorithm a Policy is read the same way: Burst is the maximum events
+// admissible in a burst, and Rate is the long-run events/sec. FixedWindow maps
+// these to a counter of up to Burst events per window of length Burst/Rate
+// seconds (so the average stays Rate); the counter resets at each window
+// boundary.
 const (
 	TokenBucket Algorithm = "token_bucket"
 	LeakyBucket Algorithm = "leaky_bucket"
+	FixedWindow Algorithm = "fixed_window"
 )
 
 // Errors returned by New and by Store implementations.

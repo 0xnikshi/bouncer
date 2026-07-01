@@ -98,6 +98,33 @@ func TestLeakyBucketBurstThenLeak(t *testing.T) {
 	}
 }
 
+func TestFixedWindow(t *testing.T) {
+	ctx := context.Background()
+	// Rate 10, Burst 5 -> window = 0.5s, limit 5 per window.
+	lim, mr := newTestLimiter(t, bouncer.Policy{Algorithm: bouncer.FixedWindow, Rate: 10, Burst: 5}, redisstore.WithKeyPrefix("f:"))
+
+	for i := 0; i < 5; i++ {
+		if ok, err := lim.Allow(ctx, "u"); err != nil || !ok {
+			t.Fatalf("event %d: ok=%v err=%v, want allowed", i, ok, err)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("6th event in the same window should be denied")
+	}
+
+	// Same window after 400ms: still denied.
+	mr.SetTime(time.Unix(1000, 0).Add(400 * time.Millisecond))
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("still within the window, should be denied")
+	}
+
+	// Next window at 500ms: count resets, allowed again.
+	mr.SetTime(time.Unix(1000, 0).Add(500 * time.Millisecond))
+	if ok, err := lim.Allow(ctx, "u"); err != nil || !ok {
+		t.Fatalf("new window: ok=%v err=%v, want allowed", ok, err)
+	}
+}
+
 func TestPerKeyIsolation(t *testing.T) {
 	ctx := context.Background()
 	lim, _ := newTestLimiter(t, bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: 2}, redisstore.WithKeyPrefix("k:"))
