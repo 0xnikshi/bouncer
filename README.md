@@ -64,21 +64,24 @@ The call site is identical regardless of broker — only the `Store` you pass to
 
 ## Algorithms
 
-| Algorithm             | Behavior                                                                       |
-| --------------------- | ----------------------------------------------------------------------------- |
-| `bouncer.TokenBucket` | Tokens accrue at `Rate` up to `Burst`. Allows bursts, caps the average.        |
-| `bouncer.LeakyBucket` | A queue of depth `Burst` draining at `Rate`. Smooths toward steady output.     |
-| `bouncer.FixedWindow` | Up to `Burst` events per fixed window of `Burst/Rate` seconds; resets at the boundary. |
+| Algorithm                      | Behavior                                                                                      |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `bouncer.TokenBucket`          | Tokens accrue at `Rate` up to `Burst`. Allows bursts, caps the average.                        |
+| `bouncer.LeakyBucket`          | A queue of depth `Burst` draining at `Rate`. Smooths toward steady output.                     |
+| `bouncer.FixedWindow`          | Up to `Burst` events per window of `Burst/Rate` s; resets at the boundary. Cheap; boundary burst up to `2×Burst`. |
+| `bouncer.SlidingWindow`        | Exact trailing window: keeps a timestamp per event, counts those within the last `Burst/Rate` s. Precise; memory grows with traffic. |
+| `bouncer.SlidingWindowCounter` | Approximates the trailing count by weighting the previous window. O(1) state; smooths the fixed-window boundary. |
 
-All three bound the long-run rate to `Rate`. The shapes differ: the token bucket
-lets a full bucket fire all at once; the leaky bucket meters events toward a
-constant outflow; the fixed window counts per time window and resets at each
-boundary (cheapest to compute, but can admit up to `2×Burst` across a boundary).
+Every algorithm reads a `Policy` the same way — `Burst` is the burst/window size
+and `Rate` is the long-run events/sec, giving a window of `Burst/Rate` seconds —
+so switching algorithms is a one-field change. E.g. `Rate: 1.67, Burst: 100` ≈
+"100 events per minute".
 
-Every algorithm reads a `Policy` the same way — `Burst` is the burst size and
-`Rate` is the long-run events/sec — so switching algorithms is a one-field
-change. For the fixed window that means a window of `Burst/Rate` seconds: e.g.
-`Rate: 1.67, Burst: 100` ≈ "100 events per minute".
+Rough guidance: **token bucket** is the sensible default (bursty but bounded);
+**leaky bucket** when you want smooth, constant output; **fixed window** when you
+want the cheapest possible counter and can tolerate the boundary burst;
+**sliding window** when you need an exact trailing-window guarantee; **sliding
+window counter** when you want near-sliding-window accuracy at O(1) cost.
 
 ## Distributed limiting with Redis (production)
 

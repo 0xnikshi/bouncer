@@ -19,8 +19,12 @@ package redisstore
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
+	"sync/atomic"
 
 	"github.com/0xnikshi/bouncer"
 	"github.com/redis/go-redis/v9"
@@ -28,6 +32,29 @@ import (
 
 // ErrNilClient is returned by New when the Redis client is nil.
 var ErrNilClient = errors.New("redisstore: redis client is nil")
+
+// idNonce is a random per-process prefix and idCounter a monotonic counter;
+// together they produce unique sorted-set member ids for the sliding window log,
+// collision-free within a process and effectively so across processes.
+var (
+	idNonce   = newNonce()
+	idCounter atomic.Uint64
+)
+
+func newNonce() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failing is catastrophic and effectively never happens;
+		// fall back to a fixed prefix so ids are still unique via the counter.
+		return "bouncer"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// uniqueID returns a process-unique member prefix for sliding window log events.
+func uniqueID() string {
+	return idNonce + "-" + strconv.FormatUint(idCounter.Add(1), 10)
+}
 
 // Store is a Redis-backed bouncer.Store.
 type Store struct {
@@ -38,9 +65,11 @@ type Store struct {
 
 // scripts maps each supported algorithm to its Lua implementation.
 var scripts = map[bouncer.Algorithm]*redis.Script{
-	bouncer.TokenBucket: redis.NewScript(tokenBucketScript),
-	bouncer.LeakyBucket: redis.NewScript(leakyBucketScript),
-	bouncer.FixedWindow: redis.NewScript(fixedWindowScript),
+	bouncer.TokenBucket:          redis.NewScript(tokenBucketScript),
+	bouncer.LeakyBucket:          redis.NewScript(leakyBucketScript),
+	bouncer.FixedWindow:          redis.NewScript(fixedWindowScript),
+	bouncer.SlidingWindow:        redis.NewScript(slidingWindowScript),
+	bouncer.SlidingWindowCounter: redis.NewScript(slidingWindowCounterScript),
 }
 
 // Option customizes a Store.
@@ -90,10 +119,13 @@ func (s *Store) Allow(ctx context.Context, key string, p bouncer.Policy, n int) 
 		return false, fmt.Errorf("%w: %q", bouncer.ErrUnsupportedAlgorithm, p.Algorithm)
 	}
 
-	res, err := script.Run(ctx, s.client,
-		[]string{s.keyPrefix + key},
-		p.Rate, p.Burst, n,
-	).Int64()
+	args := []interface{}{p.Rate, p.Burst, n}
+	if p.Algorithm == bouncer.SlidingWindow {
+		// The sliding window log needs a unique sorted-set member per call.
+		args = append(args, uniqueID())
+	}
+
+	res, err := script.Run(ctx, s.client, []string{s.keyPrefix + key}, args...).Int64()
 	if err != nil {
 		return !s.failClosed, fmt.Errorf("redisstore: redis call failed: %w", err)
 	}

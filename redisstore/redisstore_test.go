@@ -125,6 +125,60 @@ func TestFixedWindow(t *testing.T) {
 	}
 }
 
+func TestSlidingWindow(t *testing.T) {
+	ctx := context.Background()
+	// Rate 10, Burst 5 -> trailing window = 0.5s, limit 5.
+	lim, mr := newTestLimiter(t, bouncer.Policy{Algorithm: bouncer.SlidingWindow, Rate: 10, Burst: 5}, redisstore.WithKeyPrefix("sw:"))
+
+	for i := 0; i < 5; i++ {
+		if ok, err := lim.Allow(ctx, "u"); err != nil || !ok {
+			t.Fatalf("event %d: ok=%v err=%v, want allowed", i, ok, err)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("6th event should be denied")
+	}
+
+	// 400ms in: original events still inside the window -> denied.
+	mr.SetTime(time.Unix(1000, 0).Add(400 * time.Millisecond))
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("events still within the trailing window, should be denied")
+	}
+
+	// 500ms in: the t=0 events age out -> allowed.
+	mr.SetTime(time.Unix(1000, 0).Add(500 * time.Millisecond))
+	if ok, err := lim.Allow(ctx, "u"); err != nil || !ok {
+		t.Fatalf("after events aged out: ok=%v err=%v, want allowed", ok, err)
+	}
+}
+
+func TestSlidingWindowCounter(t *testing.T) {
+	ctx := context.Background()
+	// Rate 10, Burst 5 -> window = 0.5s, limit 5.
+	lim, mr := newTestLimiter(t, bouncer.Policy{Algorithm: bouncer.SlidingWindowCounter, Rate: 10, Burst: 5}, redisstore.WithKeyPrefix("swc:"))
+
+	for i := 0; i < 5; i++ {
+		if ok, err := lim.Allow(ctx, "u"); err != nil || !ok {
+			t.Fatalf("event %d: ok=%v err=%v, want allowed", i, ok, err)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("6th event should be denied")
+	}
+
+	// Start of the next window (t=500ms): previous window fully weighted -> denied.
+	mr.SetTime(time.Unix(1000, 0).Add(500 * time.Millisecond))
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("start of new window still weights the previous fully, should be denied")
+	}
+
+	// Halfway into it (t=750ms): estimate = 5*0.5 = 2.5 -> allowed.
+	mr.SetTime(time.Unix(1000, 0).Add(750 * time.Millisecond))
+	if ok, err := lim.Allow(ctx, "u"); err != nil || !ok {
+		t.Fatalf("halfway into the window: ok=%v err=%v, want allowed", ok, err)
+	}
+}
+
 func TestPerKeyIsolation(t *testing.T) {
 	ctx := context.Background()
 	lim, _ := newTestLimiter(t, bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: 2}, redisstore.WithKeyPrefix("k:"))

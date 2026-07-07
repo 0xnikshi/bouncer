@@ -151,6 +151,73 @@ func TestFixedWindow(t *testing.T) {
 	}
 }
 
+func TestSlidingWindow(t *testing.T) {
+	ctx := context.Background()
+	clk := newFakeClock() // starts at Unix(0,0)
+	// Rate 10, Burst 5 -> trailing window = 0.5s, limit 5.
+	lim, _ := bouncer.NewMemory(
+		bouncer.Policy{Algorithm: bouncer.SlidingWindow, Rate: 10, Burst: 5},
+		bouncer.WithClock(clk),
+	)
+
+	// Fill the window at t=0.
+	for i := 0; i < 5; i++ {
+		if ok, _ := lim.Allow(ctx, "u"); !ok {
+			t.Fatalf("event %d should be allowed", i)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("6th event should be denied")
+	}
+
+	// At 400ms the first events are still inside the 500ms window: still denied.
+	clk.Advance(400 * time.Millisecond)
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("events still within the trailing window, should be denied")
+	}
+
+	// At 500ms the t=0 events age out exactly, freeing capacity.
+	clk.Advance(100 * time.Millisecond)
+	if ok, _ := lim.Allow(ctx, "u"); !ok {
+		t.Fatal("original events aged out, should be allowed")
+	}
+}
+
+func TestSlidingWindowCounter(t *testing.T) {
+	ctx := context.Background()
+	clk := newFakeClock() // starts at Unix(0,0)
+	// Rate 10, Burst 5 -> window = 0.5s, limit 5.
+	lim, _ := bouncer.NewMemory(
+		bouncer.Policy{Algorithm: bouncer.SlidingWindowCounter, Rate: 10, Burst: 5},
+		bouncer.WithClock(clk),
+	)
+
+	// Fill the first window at t=0.
+	for i := 0; i < 5; i++ {
+		if ok, _ := lim.Allow(ctx, "u"); !ok {
+			t.Fatalf("event %d should be allowed", i)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("6th event should be denied")
+	}
+
+	// Entering the second window (t=500ms): the previous window is still fully
+	// weighted (frac=0), so the estimate is 5 -> still denied. This is the
+	// smoothing the plain fixed window lacks.
+	clk.Advance(500 * time.Millisecond)
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("start of new window still weights the previous fully, should be denied")
+	}
+
+	// Halfway into the second window (t=750ms): estimate = 5*0.5 + 0 = 2.5,
+	// so 2.5+1 <= 5 -> allowed.
+	clk.Advance(250 * time.Millisecond)
+	if ok, _ := lim.Allow(ctx, "u"); !ok {
+		t.Fatal("halfway into the window the estimate should permit an event")
+	}
+}
+
 func TestPerKeyIsolation(t *testing.T) {
 	ctx := context.Background()
 	lim, _ := bouncer.NewMemory(bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: 2})

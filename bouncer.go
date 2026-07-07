@@ -30,14 +30,23 @@ type Algorithm string
 // Built-in algorithms.
 //
 // For every algorithm a Policy is read the same way: Burst is the maximum events
-// admissible in a burst, and Rate is the long-run events/sec. FixedWindow maps
-// these to a counter of up to Burst events per window of length Burst/Rate
-// seconds (so the average stays Rate); the counter resets at each window
-// boundary.
+// admissible per window, and Rate is the long-run events/sec, giving a window of
+// length Burst/Rate seconds (so the average stays Rate). The window-based
+// algorithms differ in how they treat the window boundary:
+//
+//   - FixedWindow counts events per window and resets at the boundary. Cheapest,
+//     but can admit up to 2×Burst across a boundary.
+//   - SlidingWindow keeps a timestamp per event and counts those within the
+//     trailing window. Exact, but memory grows with traffic.
+//   - SlidingWindowCounter estimates the trailing count by weighting the
+//     previous window by how far the current one has advanced. Approximate, but
+//     uses O(1) state and smooths the FixedWindow boundary burst.
 const (
-	TokenBucket Algorithm = "token_bucket"
-	LeakyBucket Algorithm = "leaky_bucket"
-	FixedWindow Algorithm = "fixed_window"
+	TokenBucket          Algorithm = "token_bucket"
+	LeakyBucket          Algorithm = "leaky_bucket"
+	FixedWindow          Algorithm = "fixed_window"
+	SlidingWindow        Algorithm = "sliding_window"         // exact, timestamp-log based
+	SlidingWindowCounter Algorithm = "sliding_window_counter" // approximate, two-counter
 )
 
 // Errors returned by New and by Store implementations.

@@ -23,14 +23,19 @@ type MemoryStore struct {
 	buckets map[string]*bucket
 }
 
-// bucket holds the state for one key. val is interpreted per algorithm: tokens
-// available (token bucket), current water level (leaky bucket), or the count of
-// events in the current window (fixed window). window is the active window's
-// index, used only by the fixed window algorithm.
+// bucket holds the state for one key. Fields are interpreted per algorithm:
+//   - val: tokens available (token bucket), water level (leaky bucket), or the
+//     count in the current window (fixed / sliding-counter).
+//   - prev: the previous window's count (sliding window counter only).
+//   - last: last update time (token / leaky bucket).
+//   - window: active window index (fixed / sliding-counter).
+//   - stamps: per-event timestamps within the trailing window (sliding window).
 type bucket struct {
 	val    float64
+	prev   float64
 	last   time.Time
 	window int64
+	stamps []time.Time
 	init   bool
 }
 
@@ -57,7 +62,12 @@ func NewMemoryStore(opts ...MemoryOption) *MemoryStore {
 
 // Supports reports the algorithms MemoryStore implements.
 func (s *MemoryStore) Supports(a Algorithm) bool {
-	return a == TokenBucket || a == LeakyBucket || a == FixedWindow
+	switch a {
+	case TokenBucket, LeakyBucket, FixedWindow, SlidingWindow, SlidingWindowCounter:
+		return true
+	default:
+		return false
+	}
 }
 
 // Allow applies p to key for n events. See Store for the contract.
@@ -79,9 +89,19 @@ func (s *MemoryStore) Allow(_ context.Context, key string, p Policy, n int) (boo
 		return leakyBucketStep(b, p, n, now), nil
 	case FixedWindow:
 		return fixedWindowStep(b, p, n, now), nil
+	case SlidingWindow:
+		return slidingWindowStep(b, p, n, now), nil
+	case SlidingWindowCounter:
+		return slidingWindowCounterStep(b, p, n, now), nil
 	default:
 		return false, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, p.Algorithm)
 	}
+}
+
+// windowDuration returns the window length for the window-based algorithms:
+// Burst/Rate seconds, expressed as a time.Duration.
+func windowDuration(p Policy) time.Duration {
+	return time.Duration(float64(p.Burst) / p.Rate * float64(time.Second))
 }
 
 // tokenBucketStep advances a token bucket and decides admission. Tokens accrue
@@ -146,6 +166,63 @@ func fixedWindowStep(b *bucket, p Policy, n int, now time.Time) bool {
 	}
 
 	if b.val+float64(n) <= limit {
+		b.val += float64(n)
+		return true
+	}
+	return false
+}
+
+// slidingWindowStep advances an exact sliding window log and decides admission.
+// It keeps a timestamp per admitted event, drops any older than the trailing
+// window (Burst/Rate seconds), and allows if the remaining count plus n stays
+// within Burst.
+func slidingWindowStep(b *bucket, p Policy, n int, now time.Time) bool {
+	b.init = true
+	cutoff := now.Add(-windowDuration(p))
+
+	// stamps is kept in ascending order, so drop the leading run at/before the
+	// cutoff (i.e. events no longer inside the trailing window).
+	drop := 0
+	for drop < len(b.stamps) && !b.stamps[drop].After(cutoff) {
+		drop++
+	}
+	if drop > 0 {
+		b.stamps = b.stamps[drop:]
+	}
+
+	if len(b.stamps)+n <= p.Burst {
+		for i := 0; i < n; i++ {
+			b.stamps = append(b.stamps, now)
+		}
+		return true
+	}
+	return false
+}
+
+// slidingWindowCounterStep advances the approximate sliding window counter and
+// decides admission. It estimates the trailing count as
+// prev*(1-frac) + cur, where frac is how far the current window has advanced,
+// then admits if that estimate plus n stays within Burst.
+func slidingWindowCounterStep(b *bucket, p Policy, n int, now time.Time) bool {
+	limit := float64(p.Burst)
+	windowSec := float64(p.Burst) / p.Rate
+	pos := float64(now.UnixNano()) / float64(time.Second) / windowSec
+	windowID := int64(pos) // floor for non-negative values
+	frac := pos - float64(windowID)
+
+	switch {
+	case !b.init:
+		b.val, b.prev, b.window, b.init = 0, 0, windowID, true
+	case windowID == b.window+1:
+		// Advanced exactly one window: the current count becomes previous.
+		b.prev, b.val, b.window = b.val, 0, windowID
+	case windowID > b.window:
+		// Skipped one or more windows: no recent history remains.
+		b.prev, b.val, b.window = 0, 0, windowID
+	}
+
+	estimated := b.prev*(1-frac) + b.val
+	if estimated+float64(n) <= limit {
 		b.val += float64(n)
 		return true
 	}
