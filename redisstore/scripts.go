@@ -214,3 +214,46 @@ redis.call('EXPIRE', key, math.ceil(window) * 2 + 1)
 
 return allowed
 `
+
+// gcraScript implements the Generic Cell Rate Algorithm. State is a single
+// "theoretical arrival time" (TAT) stored as the key's value. Each admitted
+// event pushes the TAT forward by the emission interval (1/rate); a request is
+// allowed while the TAT stays within the burst tolerance (capacity/rate) of now.
+//
+// All arithmetic is in integer microseconds. Working in floating-point seconds
+// accumulates rounding error across successive additions of the emission
+// interval, which makes the boundary comparison flap; integer microseconds keep
+// it exact (and microseconds are the resolution Redis TIME provides anyway).
+const gcraScript = `
+local key       = KEYS[1]
+local rate      = tonumber(ARGV[1])
+local capacity  = tonumber(ARGV[2])
+local requested = tonumber(ARGV[3])
+
+local t   = redis.call('TIME')
+local now = tonumber(t[1]) * 1000000 + tonumber(t[2])   -- microseconds
+
+local emission = math.floor(1000000 / rate + 0.5)       -- µs per event
+if emission < 1 then emission = 1 end
+local tolerance = capacity * emission
+local increment = requested * emission
+
+-- tat = max(stored TAT, now): an idle flow resets to now.
+local tat = tonumber(redis.call('GET', key))
+if tat == nil or tat < now then
+  tat = now
+end
+
+local new_tat  = tat + increment
+local allow_at = new_tat - tolerance
+
+local allowed = 0
+if now >= allow_at then
+  allowed = 1
+  redis.call('SET', key, new_tat)
+  -- The key is stale once real time passes the TAT (+1s slack).
+  redis.call('EXPIRE', key, math.ceil((new_tat - now) / 1000000) + 1)
+end
+
+return allowed
+`

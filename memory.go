@@ -63,7 +63,7 @@ func NewMemoryStore(opts ...MemoryOption) *MemoryStore {
 // Supports reports the algorithms MemoryStore implements.
 func (s *MemoryStore) Supports(a Algorithm) bool {
 	switch a {
-	case TokenBucket, LeakyBucket, FixedWindow, SlidingWindow, SlidingWindowCounter:
+	case TokenBucket, LeakyBucket, FixedWindow, SlidingWindow, SlidingWindowCounter, GCRA:
 		return true
 	default:
 		return false
@@ -93,6 +93,8 @@ func (s *MemoryStore) Allow(_ context.Context, key string, p Policy, n int) (boo
 		return slidingWindowStep(b, p, n, now), nil
 	case SlidingWindowCounter:
 		return slidingWindowCounterStep(b, p, n, now), nil
+	case GCRA:
+		return gcraStep(b, p, n, now), nil
 	default:
 		return false, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, p.Algorithm)
 	}
@@ -227,4 +229,33 @@ func slidingWindowCounterStep(b *bucket, p Policy, n int, now time.Time) bool {
 		return true
 	}
 	return false
+}
+
+// gcraStep advances the Generic Cell Rate Algorithm and decides admission.
+//
+// State is a single "theoretical arrival time" (TAT), stored in b.last: the
+// instant at which the flow would be exactly on schedule. Each admitted event
+// pushes the TAT forward by the emission interval (1/Rate); a request is allowed
+// as long as the TAT does not run more than the burst tolerance (Burst/Rate)
+// ahead of now.
+func gcraStep(b *bucket, p Policy, n int, now time.Time) bool {
+	emission := time.Duration(float64(time.Second) / p.Rate) // 1/Rate
+	tolerance := time.Duration(p.Burst) * emission           // Burst emissions
+	increment := time.Duration(n) * emission
+
+	// tat = max(storedTAT, now): a TAT in the past means the flow is idle, so
+	// it resets to now.
+	tat := now
+	if b.init && b.last.After(now) {
+		tat = b.last
+	}
+
+	newTAT := tat.Add(increment)
+	allowAt := newTAT.Add(-tolerance)
+	if now.Before(allowAt) {
+		return false // too far ahead of schedule
+	}
+
+	b.last, b.init = newTAT, true
+	return true
 }

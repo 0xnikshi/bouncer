@@ -179,6 +179,30 @@ func TestSlidingWindowCounter(t *testing.T) {
 	}
 }
 
+func TestGCRA(t *testing.T) {
+	ctx := context.Background()
+	// Rate 10, Burst 5 -> emission = 100ms, burst tolerance = 500ms.
+	lim, mr := newTestLimiter(t, bouncer.Policy{Algorithm: bouncer.GCRA, Rate: 10, Burst: 5}, redisstore.WithKeyPrefix("g:"))
+
+	for i := 0; i < 5; i++ {
+		if ok, err := lim.Allow(ctx, "u"); err != nil || !ok {
+			t.Fatalf("event %d: ok=%v err=%v, want allowed", i, ok, err)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("6th immediate event should be denied")
+	}
+
+	// One emission interval later, exactly one event frees up.
+	mr.SetTime(time.Unix(1000, 0).Add(100 * time.Millisecond))
+	if ok, err := lim.Allow(ctx, "u"); err != nil || !ok {
+		t.Fatalf("after one emission interval: ok=%v err=%v, want allowed", ok, err)
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("only one event should have freed up")
+	}
+}
+
 func TestPerKeyIsolation(t *testing.T) {
 	ctx := context.Background()
 	lim, _ := newTestLimiter(t, bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: 2}, redisstore.WithKeyPrefix("k:"))

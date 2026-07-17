@@ -218,6 +218,35 @@ func TestSlidingWindowCounter(t *testing.T) {
 	}
 }
 
+func TestGCRA(t *testing.T) {
+	ctx := context.Background()
+	clk := newFakeClock() // starts at Unix(0,0)
+	// Rate 10, Burst 5 -> emission = 100ms, burst tolerance = 500ms.
+	lim, _ := bouncer.NewMemory(
+		bouncer.Policy{Algorithm: bouncer.GCRA, Rate: 10, Burst: 5},
+		bouncer.WithClock(clk),
+	)
+
+	// A fresh flow admits Burst events up front.
+	for i := 0; i < 5; i++ {
+		if ok, _ := lim.Allow(ctx, "u"); !ok {
+			t.Fatalf("event %d should be allowed from a fresh flow", i)
+		}
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("6th immediate event should be denied")
+	}
+
+	// After one emission interval (100ms) exactly one event frees up.
+	clk.Advance(100 * time.Millisecond)
+	if ok, _ := lim.Allow(ctx, "u"); !ok {
+		t.Fatal("event should be allowed after one emission interval")
+	}
+	if ok, _ := lim.Allow(ctx, "u"); ok {
+		t.Fatal("only one event should have freed up")
+	}
+}
+
 func TestPerKeyIsolation(t *testing.T) {
 	ctx := context.Background()
 	lim, _ := bouncer.NewMemory(bouncer.Policy{Algorithm: bouncer.TokenBucket, Rate: 1, Burst: 2})

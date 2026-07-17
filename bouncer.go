@@ -41,12 +41,18 @@ type Algorithm string
 //   - SlidingWindowCounter estimates the trailing count by weighting the
 //     previous window by how far the current one has advanced. Approximate, but
 //     uses O(1) state and smooths the FixedWindow boundary burst.
+//
+// GCRA (the Generic Cell Rate Algorithm) is not window-based: it tracks a single
+// "theoretical arrival time" per key and admits Burst events up front, then
+// paces at Rate. It is O(1) state, smooth like a leaky bucket, bursty like a
+// token bucket, and free of window-boundary artifacts.
 const (
 	TokenBucket          Algorithm = "token_bucket"
 	LeakyBucket          Algorithm = "leaky_bucket"
 	FixedWindow          Algorithm = "fixed_window"
 	SlidingWindow        Algorithm = "sliding_window"         // exact, timestamp-log based
 	SlidingWindowCounter Algorithm = "sliding_window_counter" // approximate, two-counter
+	GCRA                 Algorithm = "gcra"                   // generic cell rate algorithm
 )
 
 // Errors returned by New and by Store implementations.

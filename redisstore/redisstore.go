@@ -70,6 +70,7 @@ var scripts = map[bouncer.Algorithm]*redis.Script{
 	bouncer.FixedWindow:          redis.NewScript(fixedWindowScript),
 	bouncer.SlidingWindow:        redis.NewScript(slidingWindowScript),
 	bouncer.SlidingWindowCounter: redis.NewScript(slidingWindowCounterScript),
+	bouncer.GCRA:                 redis.NewScript(gcraScript),
 }
 
 // Option customizes a Store.
